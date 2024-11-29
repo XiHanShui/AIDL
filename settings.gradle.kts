@@ -22,8 +22,8 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "AIDL"
-include(":app")
+include(":clientSample")
 include(":library-AIDL")
 include(":library-AIDLService")
 include(":library-AIDLClient")
-include(":service")
+include(":serviceSample")
