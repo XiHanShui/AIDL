@@ -9,6 +9,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.oct.aidl.client.AIDLClient
+import com.oct.aidl.client.IResponseCallback
 import java.util.UUID
 import kotlin.concurrent.thread
 
@@ -27,8 +28,6 @@ class MainActivity : AppCompatActivity() {
         }
 
 
-
-
     }
 
     private val aidlClient  by lazy { AIDLClient(applicationContext, "com.oct.service","com.oct.test") }
@@ -44,9 +43,14 @@ class MainActivity : AppCompatActivity() {
                 thread {
 //                    Thread.sleep(1000)
                    aidlClient.request(Request(params = "1111",
-                        ), cb = {
-                        Log.e("MainActivity", "test: $it")
-                    })
+                        ), cb =object :IResponseCallback(){
+                       override fun callback(result: Response) {
+
+                       }
+
+
+
+                   })
 
                 }
             }

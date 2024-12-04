@@ -3,12 +3,14 @@ package com.oct.aidl.client
 import com.oct.aidl.Response
 import java.util.UUID
 
-fun interface IResponseCallback {
+abstract class IResponseCallback {
+
+    lateinit var requestId: String
 
     /**
      * 请求成功
      */
-    fun callback(result: Response)
+    abstract fun callback(result: Response)
 
 
 }
