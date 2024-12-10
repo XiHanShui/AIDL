@@ -10,8 +10,10 @@ import android.util.Log
 import com.oct.aidl.ICommonService
 import com.oct.aidl.IRequestCallback
 import com.oct.aidl.IService2Client
+import com.oct.aidl.KLog
 import com.oct.aidl.Request
 import com.oct.aidl.Response
+import com.oct.aidl.ResponseCode
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -19,7 +21,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
-class AIDLClient(private val context: Context, private val pkg: String, private val action: String) {
+
+class AIDLClient(val action: String, private val serverPkg: String) {
 
 
     private var latch: CountDownLatch? = null
@@ -36,12 +39,19 @@ class AIDLClient(private val context: Context, private val pkg: String, private 
     @Volatile
     private var service2Client: IServiceCallback? = null
 
+    /**
+     * 是否已注册 请求回调
+     */
     @Volatile
-    private var isRegister = false
+    private var isRegisterClientListener = false
 
+    /**
+     * 是否已注册 服务端主动给到客户端监听
+     */
     @Volatile
-    private var isRegisterServiceCallback = false
+    private var isRegisterServiceListener = false
 
+    private val pkg by lazy { ClientManager.instance.context.packageName }
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(p0: ComponentName?, binder: IBinder) {
@@ -50,18 +60,27 @@ class AIDLClient(private val context: Context, private val pkg: String, private 
         }
 
         override fun onServiceDisconnected(p0: ComponentName?) {
+            isRegisterClientListener = false
+            isRegisterServiceListener = false
             stub = null
-            isRegister = false
+            KLog.w(
+                """
+                service disconnected
+                clientId: $clientId
+                action: $action
+                serverPkg :$serverPkg
+            """.trimIndent()
+            )
             lock.withLock {
                 for (cb in requestCallbackCache.values) {
-                    cb.callback(Response(-1, "service disconnected", cb.requestId))
+                    cb.callback(Response(ResponseCode.SERVER_DISCONNECTED, "", cb.requestId))
                 }
                 requestCallbackCache.clear()
             }
         }
     }
 
-    private val requestCb by lazy {
+    private val requestListener by lazy {
         object : IRequestCallback.Stub() {
             override fun onResult(response: Response) {
                 val cb = lock.withLock {
@@ -74,17 +93,15 @@ class AIDLClient(private val context: Context, private val pkg: String, private 
         }
     }
 
-    private val service2ClientCb by lazy {
+    private val serviceListener by lazy {
         object : IService2Client.Stub() {
             override fun service2Client(action: String, data: String?) {
                 service2Client?.service2Client(action, data)
             }
-
         }
     }
 
 
-    @Synchronized
     private fun bindService(): Boolean {
         if (stub != null) {
             return true
@@ -92,14 +109,24 @@ class AIDLClient(private val context: Context, private val pkg: String, private 
         if (latch?.count != 0L) {
             latch = CountDownLatch(1)
         }
-        isRegister = false
-        val intent = Intent(action)
-        intent.`package` = pkg
-        Log.e("AIDLClient", "connectService")
-        var result = context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        isRegisterClientListener = false
+        var result: Boolean
         try {
+            KLog.d(
+                """        
+            bindService
+            action: $action
+            serverPackage: $serverPkg
+        """.trimIndent()
+            )
+            // 绑定服务
+            result = ClientManager.instance.context.bindService(Intent(action).apply {
+                `package` = serverPkg
+            }, connection, Context.BIND_AUTO_CREATE)
+            // 如果12s 内没有绑定成功,则返回false
             latch?.await(12, TimeUnit.SECONDS)
         } catch (e: Exception) {
+            KLog.e("bindService error---------")
             e.printStackTrace()
             result = false
         }
@@ -107,42 +134,65 @@ class AIDLClient(private val context: Context, private val pkg: String, private 
     }
 
 
-    fun disconnectService() {
+    /**
+     *  解绑服务
+     */
+    fun unbindService() {
+        KLog.d(
+            """
+                unbindService
+                action: $action
+                serverPackage: $serverPkg
+            """.trimIndent()
+        )
         if (stub != null) {
-            context.unbindService(connection)
+            ClientManager.instance.context.unbindService(connection)
         }
     }
 
-    fun registerService2ClientCallback(callback: IServiceCallback): Response {
+    /**
+     * 注册服务监听
+     */
+    fun registerService2ClientListener(callback: IServiceCallback): Response {
+        KLog.d("registerService2ClientCallback")
         this.service2Client = null
         this.service2Client = callback
-        return if (!isRegisterServiceCallback) {
+        return if (!isRegisterServiceListener) {
             val request = Request(params = "")
-            val response = checkConnectState(request)
-            val result = if (response.code == 0) {
-                stub?.registerService2Client(clientId, pkg, service2ClientCb) ?: false
+            val response = checkServiceBindingStatus()
+            val result = if (response == ResponseCode.SUCCESS) {
+                stub?.registerService2Client(clientId, pkg, serviceListener) ?: false
             } else {
-                return response
+                return Response(response, "", request.requestId)
             }
-            isRegisterServiceCallback=result
+            isRegisterServiceListener = result
             if (result) {
-                Response(0, "连接成功", request.requestId)
+                Response(ResponseCode.SUCCESS, "", request.requestId)
             } else {
                 Response(-1, "连接失败", request.requestId)
             }
         } else {
-            Response(0, "已连接", Request(params = "").requestId)
+            Response(0, "", Request(params = "").requestId)
         }
     }
 
 
     fun request(request: Request, cb: IResponseCallback) {
-        val response = checkConnectState(request)
-        cb.requestId = request.requestId
-        if (response.code != 0) {
-            cb.callback(response)
+        // 检查服务端连接状态
+        val response = checkServiceBindingStatus()
+        if (response != ResponseCode.SUCCESS) {
+            cb.callback(Response(response, "", request.requestId))
             return
         }
+        KLog.d(
+            """
+            startRequest :${request}
+            action: $action
+            serverPackage: $serverPkg
+        """.trimIndent()
+        )
+
+        cb.requestId = request.requestId
         lock.withLock { requestCallbackCache[request.requestId] = cb }
         Log.e("AIDLClient", "clientId:${clientId}")
         val l = System.currentTimeMillis()
@@ -164,45 +214,70 @@ class AIDLClient(private val context: Context, private val pkg: String, private 
      * 发送参数请求
      */
     fun request(request: Request): Response {
-        val response = checkConnectState(request)
-        if (response.code != 0) {
-            return response
+        val response = checkServiceBindingStatus()
+        if (response != ResponseCode.SUCCESS) {
+            return Response(response, "", request.requestId)
         }
-        return stub?.request(request) ?: Response(
-            -1,
-            "The request failed to be sent, maybe the server did not implement the code",
-            request.requestId
+
+        KLog.d(
+            """
+            startRequest :${request}
+            action: $action
+            serverPackage: $serverPkg
+        """.trimIndent()
         )
+
+        val result = stub?.request(request) ?: Response(ResponseCode.SERVER_DISCONNECTED, "", request.requestId)
+        KLog.d("endRequest :$result")
+        return result
+
     }
 
     /**
-     * 校验连接状态
-     *
+     * 检查服务绑定状态
      */
-    private fun checkConnectState(request: Request, isCheckRequest: Boolean = false): Response {
-        var result = true
-        if (stub == null) {
+    @Synchronized
+    private fun checkServiceBindingStatus(isCheckRequestListener: Boolean = false): Int {
+        val result = if (stub == null) {
             val currentTimeMillis = System.currentTimeMillis()
-            result = bindService()
-            Log.e("AIDLClient", "bindService:${System.currentTimeMillis() - currentTimeMillis}")
+
+            val bindResult = bindService()
+            KLog.d(
+                """
+                bindServiceResult:$bindResult
+                bindServiceDuration:${System.currentTimeMillis() - currentTimeMillis}ms
+                action: $action
+                serverPackage: $serverPkg
+            """.trimIndent()
+            )
+            bindResult
+        } else {
+            false
         }
-        if (!result) {
-            return Response(-1, "Server connection failed", request.requestId)
+        return if (result) {
+            // 检查是否已经注册或者是否需要注册
+            if (!isRegisterClientListener && isCheckRequestListener) {
+                isRegisterClientListener =
+                    stub?.registerClient(clientId, pkg, requestListener) ?: false
+                KLog.d(
+                    """
+                注册客户端监听器结果：$isRegisterClientListener
+                action: $action
+                serverPackage: $serverPkg    
+                """.trimIndent()
+                )
+            }
+            if (!isRegisterClientListener && isCheckRequestListener) ResponseCode.REGISTER_ERROR else ResponseCode.SUCCESS
+        } else {
+            ResponseCode.SERVER_NO_FOND
         }
-        if (!isRegister && isCheckRequest) {
-            isRegister = stub?.registerClient(clientId, pkg, requestCb) ?: false
-        }
-        if (!isRegister && isCheckRequest) {
-            return Response(-1, "Callback function registration failed", request.requestId)
-        }
-        return Response(0, "success", request.requestId)
     }
 
 
-    private fun transferringFile(path: String): Response {
-        val response = checkConnectState(Request(params = "transferringFile"))
-        if (response.code != 0) {
-            return response
+    fun transferringFile(path: String): Response {
+        val result = checkServiceBindingStatus()
+        if (result != ResponseCode.SUCCESS) {
+            return Response(result, "", "")
         }
         var pfd: ParcelFileDescriptor? = null
         try {
@@ -217,8 +292,13 @@ class AIDLClient(private val context: Context, private val pkg: String, private 
         }
     }
 
-    fun isRegisterService2ClientCallback(): Boolean {
-        return service2Client != null && isRegisterServiceCallback
+
+    fun isRegisterServiceListener(): Boolean {
+        return service2Client != null && isRegisterServiceListener
+    }
+
+    fun isRegisterClientListener(): Boolean {
+        return stub != null && isRegisterClientListener
     }
 
 

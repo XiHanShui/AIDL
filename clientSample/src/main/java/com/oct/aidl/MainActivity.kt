@@ -9,7 +9,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.oct.aidl.client.AIDLClient
+import com.oct.aidl.client.ClientManager
 import com.oct.aidl.client.IResponseCallback
+import java.time.Duration
 import java.util.UUID
 import kotlin.concurrent.thread
 
@@ -26,11 +28,11 @@ class MainActivity : AppCompatActivity() {
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
             insets
         }
-
+        ClientManager.instance.init(applicationContext,true, Duration.ofSeconds(10))
 
     }
 
-    private val aidlClient  by lazy { AIDLClient(applicationContext, "com.oct.service","com.oct.test") }
+    private val aidlClient  by lazy { AIDLClient( "com.oct.test","com.oct.service") }
 
     fun test(view: View) {
 
